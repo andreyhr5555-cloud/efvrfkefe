@@ -1,3 +1,2 @@
-python==3.11
 aiogram==2.25.1
 supabase-py==1.0.3
