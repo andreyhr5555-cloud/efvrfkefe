@@ -8,7 +8,7 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.dispatcher import FSMContext
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 import asyncio
-from supabase_py import create_client, Client
+from supabase import create_client, Client
 
 # Supabase credentials
 SUPABASE_URL = "https://dqrzvzilbelqnxdbhtoz.supabase.co"
