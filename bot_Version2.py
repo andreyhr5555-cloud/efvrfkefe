@@ -29,7 +29,7 @@ CATEGORIES_IT = ["Работа юа", "Джубл", "Телеграм", "Тар�
 
 logging.basicConfig(level=logging.INFO)
 
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=8351987683:AAH-ujJAuKJKljTvPF7vhU-wVR_VJQRzAZ0)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
 # --- FSM States ---
