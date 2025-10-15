@@ -1,34 +1,37 @@
 import os
 import logging
 from datetime import datetime
+import asyncio
+from threading import Thread
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.dispatcher import FSMContext
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.utils.executor import start_webhook
+from aiogram.utils import executor
 from supabase import create_client, Client
 from aiohttp import web
 
-# --- Supabase credentials ---
-SUPABASE_URL = "https://dqrzvzilbelqnxdbhtoz.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRxcnp2emlsYmVscW54ZGJodG96Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA0NzI3NjUsImV4cCI6MjA3NjA0ODc2NX0.OXUu4b5blVdd3n8lZeYHkqLHurxsxUJvDmfhDFR-Uck"
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# --- Telegram Bot token ---
-BOT_TOKEN = os.getenv("BOT_TOKEN") or "8351987683:AAH-ujJAuKJKljTvPF7vhU-wVR_VJQRzAZ0"
-
-# --- User lists and categories ---
-ADMIN = "denisHr55"
-HR_LIST = [
-    "mkkdko", "Annahrg25", "sun_crazy", "dooro4ka", "nuttupp", "luilu_hr", "Dmytry44gg", "lilkalinaa_rabotka",
-    "kirusiyaaa15", "VladHR27", "sophie_hr", "DimitryHr", "karisha522", "arinaa_hr"
-]
-IT_LIST = ["denishr55"]
-CATEGORIES_IT = ["Работа юа", "Джубл", "Телеграм", "Таргет", "Другое"]
-
+# --- Logging ---
 logging.basicConfig(level=logging.INFO)
 
+# --- Environment variables ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+ADMIN = os.getenv("ADMIN_USERNAME", "denisHr55")
+HR_LIST = os.getenv("HR_LIST", "mkkdko,Annahrg25,sun_crazy,dooro4ka,nuttupp,luilu_hr,Dmytry44gg,lilkalinaa_rabotka,kirusiyaaa15,VladHR27,sophie_hr,DimitryHr,karisha522,arinaa_hr").split(",")
+IT_LIST = os.getenv("IT_LIST", "denishr55").split(",")
+CATEGORIES_IT = ["Работа юа", "Джубл", "Телеграм", "Таргет", "Другое"]
+
+if not BOT_TOKEN or not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("BOT_TOKEN, SUPABASE_URL, or SUPABASE_KEY not set in environment variables")
+
+# --- Supabase client ---
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# --- Bot and dispatcher ---
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
@@ -53,7 +56,6 @@ def main_keyboard(username):
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     if username == ADMIN:
         kb.add(KeyboardButton("Админ"))
-        kb.add(KeyboardButton("Пришли"))
     if username in HR_LIST or username in IT_LIST:
         kb.add(KeyboardButton("Потратил"))
         kb.add(KeyboardButton("Баланс"))
@@ -113,12 +115,6 @@ def add_income(username, amount):
         "datetime": now
     }).execute()
 
-def set_expense_paid(expense_id):
-    supabase.table("expenses").update({"status": "paid"}).eq("id", expense_id).execute()
-
-def get_pending_expenses():
-    return supabase.table("expenses").select("*").eq("status", "pending").execute().data
-
 def get_user_balance(username):
     user = get_user(username)
     if user:
@@ -141,20 +137,12 @@ async def start(msg: types.Message):
         supabase.table("users").insert({
             "username": username, "role": role, "balance": 0
         }).execute()
-    await msg.answer(f"Добро пожаловать в бухгалтерию! Ваш профиль: {username}", reply_markup=main_keyboard(username))
+    await msg.answer(f"Добро пожаловать! Ваш профиль: {username}", reply_markup=main_keyboard(username))
 
-@dp.message_handler(lambda msg: msg.text == "Админ" and msg.from_user.username == ADMIN)
-async def admin_menu(msg: types.Message):
-    await msg.answer("Меню Админа", reply_markup=admin_keyboard())
-
+# --- Income ---
 @dp.message_handler(lambda msg: msg.text == "Пришли" and (msg.from_user.username in IT_LIST or msg.from_user.username == ADMIN))
 async def it_income(msg: types.Message):
-    await msg.answer("Введи сумму пополнения:", reply_markup=types.ReplyKeyboardRemove())
-    await IncomeFSM.amount.set()
-
-@dp.message_handler(lambda msg: msg.text == "ПОПОЛНИТЬ баланс" and msg.from_user.username == ADMIN)
-async def admin_topup(msg: types.Message):
-    await msg.answer("Введите сумму пополнения баланса Админа:", reply_markup=types.ReplyKeyboardRemove())
+    await msg.answer("Введите сумму пополнения:", reply_markup=types.ReplyKeyboardRemove())
     await IncomeFSM.amount.set()
 
 @dp.message_handler(state=IncomeFSM.amount)
@@ -165,10 +153,82 @@ async def process_income(msg: types.Message, state: FSMContext):
         add_income(username, amount)
         update_user_balance(username, amount)
         await msg.answer(f"Баланс пополнен на {amount}. Новый баланс: {get_user_balance(username)}", reply_markup=main_keyboard(username))
-    except Exception as e:
+    except Exception:
         await msg.answer("Ошибка ввода суммы! Попробуйте снова.")
     await state.finish()
 
+# --- Expense IT/HR ---
+@dp.message_handler(lambda msg: msg.text == "Потратил" and msg.from_user.username in IT_LIST)
+async def it_expense(msg: types.Message):
+    await msg.answer("Выберите ресурс:", reply_markup=resource_keyboard())
+    await ExpenseFSM.resource.set()
+
+@dp.message_handler(lambda msg: msg.text == "Потратил" and msg.from_user.username in HR_LIST)
+async def hr_expense(msg: types.Message):
+    await msg.answer("Введите сумму расхода:", reply_markup=types.ReplyKeyboardRemove())
+    await ExpenseFSM.amount.set()
+
+@dp.message_handler(state=ExpenseFSM.resource)
+async def it_expense_resource(msg: types.Message, state: FSMContext):
+    if msg.text not in CATEGORIES_IT:
+        await msg.answer("Выберите категорию из списка.")
+        return
+    await state.update_data(resource=msg.text)
+    await msg.answer("Введите сумму расхода:", reply_markup=types.ReplyKeyboardRemove())
+    await ExpenseFSM.amount.set()
+
+@dp.message_handler(state=ExpenseFSM.amount)
+async def expense_amount(msg: types.Message, state: FSMContext):
+    try:
+        amount = float(msg.text.replace(",", "."))
+        await state.update_data(amount=amount)
+        await msg.answer("Прикрепите фото или напишите 'наличка'")
+        await ExpenseFSM.photo.set()
+    except Exception:
+        await msg.answer("Ошибка ввода суммы! Попробуйте снова.")
+
+@dp.message_handler(content_types=['photo'], state=ExpenseFSM.photo)
+async def expense_photo(msg: types.Message, state: FSMContext):
+    file_id = msg.photo[-1].file_id
+    await state.update_data(photo_id=file_id, is_cash=False)
+    await msg.answer("Отправить админу? (да/нет)")
+    await ExpenseFSM.to_admin.set()
+
+@dp.message_handler(lambda msg: msg.text.lower() == "наличка", state=ExpenseFSM.photo)
+async def expense_cash(msg: types.Message, state: FSMContext):
+    await state.update_data(photo_id=None, is_cash=True)
+    await msg.answer("Отправить админу? (да/нет)")
+    await ExpenseFSM.to_admin.set()
+
+@dp.message_handler(state=ExpenseFSM.to_admin)
+async def expense_to_admin(msg: types.Message, state: FSMContext):
+    data = await state.get_data()
+    username = msg.from_user.username
+    amount = data.get("amount")
+    resource = data.get("resource", "HR-расход")
+    photo_id = data.get("photo_id")
+    is_cash = data.get("is_cash")
+    to_admin = msg.text.lower() == "да"
+    add_expense(username, amount, resource, photo_id, is_cash, to_admin)
+    update_user_balance(username, -amount)
+    if to_admin:
+        text = f"Новый расход от @{username} на {amount} грн, категория: {resource}"
+        if photo_id:
+            await bot.send_photo(chat_id=f"@{ADMIN}", photo=photo_id, caption=text)
+        else:
+            await bot.send_message(chat_id=f"@{ADMIN}", text=text + " (наличка)")
+        await msg.answer("Отправлено админу!", reply_markup=main_keyboard(username))
+    else:
+        await msg.answer("Расход списан с баланса.", reply_markup=main_keyboard(username))
+    await state.finish()
+
+# --- User balance ---
+@dp.message_handler(lambda msg: msg.text == "Баланс" and (msg.from_user.username in HR_LIST + IT_LIST or msg.from_user.username == ADMIN))
+async def user_balance(msg: types.Message):
+    balance = get_user_balance(msg.from_user.username)
+    await msg.answer(f"Ваш баланс: {balance} грн", reply_markup=main_keyboard(msg.from_user.username))
+
+# --- Admin: Give money ---
 @dp.message_handler(lambda msg: msg.text == "Перевести пользователям" and msg.from_user.username == ADMIN)
 async def admin_give_money(msg: types.Message):
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -196,10 +256,10 @@ async def admin_give_user(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     cat = data.get("category")
     if cat == "hr" and user not in HR_LIST:
-        await msg.answer("Выберите пользователя из списка HR")
+        await msg.answer("Выберите пользователя из HR списка")
         return
     if cat == "it" and user not in IT_LIST:
-        await msg.answer("Выберите пользователя из списка IT")
+        await msg.answer("Выберите пользователя из IT списка")
         return
     await state.update_data(user=user)
     await msg.answer("Введите сумму:")
@@ -215,84 +275,11 @@ async def admin_give_amount(msg: types.Message, state: FSMContext):
         update_user_balance(ADMIN, -amount)
         await bot.send_message(chat_id=f"@{user}", text=f"Вам поступило {amount} грн от Админа. Новый баланс: {get_user_balance(user)}")
         await msg.answer(f"Вы выдали {amount} грн @{user}. Баланс пользователя: {get_user_balance(user)}", reply_markup=admin_keyboard())
-    except Exception as e:
+    except Exception:
         await msg.answer("Ошибка ввода суммы! Попробуйте снова.")
     await state.finish()
 
-@dp.message_handler(lambda msg: msg.text == "Потратил" and msg.from_user.username in IT_LIST)
-async def it_expense(msg: types.Message, state: FSMContext):
-    await msg.answer("Выбери ресурс:", reply_markup=resource_keyboard())
-    await ExpenseFSM.resource.set()
-
-@dp.message_handler(state=ExpenseFSM.resource)
-async def it_expense_resource(msg: types.Message, state: FSMContext):
-    if msg.text not in CATEGORIES_IT:
-        await msg.answer("Выберите категорию из списка.")
-        return
-    await state.update_data(resource=msg.text)
-    await msg.answer("Введи сумму расхода:", reply_markup=types.ReplyKeyboardRemove())
-    await ExpenseFSM.amount.set()
-
-@dp.message_handler(lambda msg: msg.text == "Потратил" and msg.from_user.username in HR_LIST)
-async def hr_expense(msg: types.Message, state: FSMContext):
-    await msg.answer("Введи сумму расхода:", reply_markup=types.ReplyKeyboardRemove())
-    await ExpenseFSM.amount.set()
-
-@dp.message_handler(state=ExpenseFSM.amount)
-async def expense_amount(msg: types.Message, state: FSMContext):
-    try:
-        amount = float(msg.text.replace(",", "."))
-        await state.update_data(amount=amount)
-        await msg.answer("Прикрепи фото чека/скриншот или напиши 'наличка' если наличкой")
-        await ExpenseFSM.photo.set()
-    except Exception as e:
-        await msg.answer("Ошибка ввода суммы! Попробуйте снова.")
-
-@dp.message_handler(lambda msg: msg.text.lower() == "наличка", state=ExpenseFSM.photo)
-async def expense_cash(msg: types.Message, state: FSMContext):
-    await state.update_data(photo_id=None, is_cash=True)
-    await msg.answer("Отправить админу или просто списать с баланса? (да/нет)")
-    await ExpenseFSM.to_admin.set()
-
-@dp.message_handler(content_types=['photo'], state=ExpenseFSM.photo)
-async def expense_photo(msg: types.Message, state: FSMContext):
-    file_id = msg.photo[-1].file_id
-    await state.update_data(photo_id=file_id, is_cash=False)
-    await msg.answer("Отправить админу или просто списать с баланса? (да/нет)")
-    await ExpenseFSM.to_admin.set()
-
-@dp.message_handler(state=ExpenseFSM.to_admin)
-async def expense_to_admin(msg: types.Message, state: FSMContext):
-    data = await state.get_data()
-    username = msg.from_user.username
-    amount = data.get("amount")
-    resource = data.get("resource", "HR-расход")
-    photo_id = data.get("photo_id")
-    is_cash = data.get("is_cash")
-    to_admin = msg.text.lower() == "да"
-    add_expense(username, amount, resource, photo_id, is_cash, to_admin)
-    update_user_balance(username, -amount)
-    if to_admin:
-        text = f"Новый расходник от @{username} на сумму {amount} грн. Категория: {resource}\nДата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        if photo_id:
-            await bot.send_photo(chat_id=f"@{ADMIN}", photo=photo_id, caption=text, reply_markup=InlineKeyboardMarkup().add(
-                InlineKeyboardButton("Оплатил", callback_data=f"pay_{username}_{amount}")
-            ))
-        else:
-            await bot.send_message(chat_id=f"@{ADMIN}", text=text + "\n(наличка)", reply_markup=InlineKeyboardMarkup().add(
-                InlineKeyboardButton("Оплатил", callback_data=f"pay_{username}_{amount}")
-            ))
-        await msg.answer("Отправлено админу!", reply_markup=main_keyboard(username))
-    else:
-        await msg.answer("Расход просто списан с баланса.", reply_markup=main_keyboard(username))
-    await state.finish()
-
-@dp.message_handler(lambda msg: msg.text == "Баланс" and (msg.from_user.username in HR_LIST or msg.from_user.username in IT_LIST or msg.from_user.username == ADMIN))
-async def user_balance(msg: types.Message):
-    username = msg.from_user.username
-    balance = get_user_balance(username)
-    await msg.answer(f"Ваш баланс: {balance} грн", reply_markup=main_keyboard(username))
-
+# --- Admin: Balances and stats ---
 @dp.message_handler(lambda msg: msg.text == "Балансы пользователей" and msg.from_user.username == ADMIN)
 async def admin_balances(msg: types.Message):
     balances = get_all_balances()
@@ -312,36 +299,32 @@ async def admin_stats(msg: types.Message):
     out += f"\nВсего потрачено: {total} грн"
     await msg.answer(out)
 
-# --- Healthcheck endpoint for Render keepalive ---
+# --- Healthcheck endpoint ---
 async def healthcheck(request):
     return web.Response(text="OK")
 
 def setup_healthcheck(app):
     app.router.add_get("/", healthcheck)
 
-# --- Webhook settings (for Render) ---
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://your-app-name.onrender.com")
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
-WEBAPP_HOST = "0.0.0.0"
-WEBAPP_PORT = int(os.environ.get("PORT", 10000))
+# --- Keep-alive polling task ---
+async def keep_alive():
+    while True:
+        try:
+            await bot.get_me()
+            await asyncio.sleep(600)
+        except Exception:
+            await asyncio.sleep(60)
 
-async def on_startup(dp):
-    await bot.set_webhook(WEBHOOK_URL)
-
-async def on_shutdown(dp):
-    await bot.delete_webhook()
-
+# --- Main ---
 if __name__ == '__main__':
+    port = int(os.getenv("PORT", 8000))
     app = web.Application()
     setup_healthcheck(app)
-    start_webhook(
-        dispatcher=dp,
-        webhook_path=WEBHOOK_PATH,
-        on_startup=on_startup,
-        on_shutdown=on_shutdown,
-        host=WEBAPP_HOST,
-        port=WEBAPP_PORT,
-        skip_updates=True,
-        app=app,
-    )
+
+    # Запуск веб-сервера Render в отдельном потоке
+    Thread(target=lambda: web.run_app(app, host="0.0.0.0", port=port)).start()
+
+    # Запуск polling
+    loop = asyncio.get_event_loop()
+    loop.create_task(keep_alive())
+    executor.start_polling(dp, skip_updates=True)
