@@ -2,8 +2,8 @@ import os
 import logging
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
-from aiogram.utils import executor
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.executor import start_webhook
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.dispatcher import FSMContext
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
@@ -15,10 +15,9 @@ SUPABASE_URL = "https://dqrzvzilbelqnxdbhtoz.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRxcnp2emlsYmVscW54ZGJodG96Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA0NzI3NjUsImV4cCI6MjA3NjA0ODc2NX0.OXUu4b5blVdd3n8lZeYHkqLHurxsxUJvDmfhDFR-Uck"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Telegram Bot token from environment variable
-BOT_TOKEN = os.getenv("8351987683:AAH-ujJAuKJKljTvPF7vhU-wVR_VJQRzAZ0")
+# Telegram Bot token
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "8351987683:AAH-ujJAuKJKljTvPF7vhU-wVR_VJQRzAZ0"
 
-# Telegram usernames
 ADMIN = "denisHr55"
 HR_LIST = [
     "mkkdko", "Annahrg25", "sun_crazy", "dooro4ka", "nuttupp", "luilu_hr", "Dmytry44gg", "lilkalinaa_rabotka",
@@ -29,7 +28,7 @@ CATEGORIES_IT = ["Работа юа", "Джубл", "Телеграм", "Тар�
 
 logging.basicConfig(level=logging.INFO)
 
-bot = Bot(token="8351987683:AAH-ujJAuKJKljTvPF7vhU-wVR_VJQRzAZ0")
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
 # --- FSM States ---
@@ -53,6 +52,7 @@ def main_keyboard(username):
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     if username == ADMIN:
         kb.add(KeyboardButton("Админ"))
+        kb.add(KeyboardButton("Пришли"))
     if username in HR_LIST or username in IT_LIST:
         kb.add(KeyboardButton("Потратил"))
         kb.add(KeyboardButton("Баланс"))
@@ -63,6 +63,7 @@ def main_keyboard(username):
 def admin_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton("ДАЛ ДЕНЕГ"))
+    kb.add(KeyboardButton("ПОПОЛНИТЬ баланс"))
     kb.add(KeyboardButton("Статистика"))
     kb.add(KeyboardButton("Балансы пользователей"))
     kb.add(KeyboardButton("Должен"))
@@ -127,7 +128,6 @@ def get_all_balances():
     return supabase.table("users").select("username, balance, role").execute().data
 
 def get_stats():
-    # Example: Total expenses, per user etc.
     return supabase.table("expenses").select("*").execute().data
 
 # --- Handlers ---
@@ -136,7 +136,6 @@ async def start(msg: types.Message):
     username = msg.from_user.username
     user = get_user(username)
     if not user:
-        # Determine user role
         role = "admin" if username == ADMIN else ("it" if username in IT_LIST else ("hr" if username in HR_LIST else "unknown"))
         supabase.table("users").insert({
             "username": username, "role": role, "balance": 0
@@ -147,9 +146,14 @@ async def start(msg: types.Message):
 async def admin_menu(msg: types.Message):
     await msg.answer("Меню Админа", reply_markup=admin_keyboard())
 
-@dp.message_handler(lambda msg: msg.text == "Пришли" and msg.from_user.username in IT_LIST)
+@dp.message_handler(lambda msg: msg.text == "Пришли" and (msg.from_user.username in IT_LIST or msg.from_user.username == ADMIN))
 async def it_income(msg: types.Message):
     await msg.answer("Введи сумму пополнения:", reply_markup=types.ReplyKeyboardRemove())
+    await IncomeFSM.amount.set()
+
+@dp.message_handler(lambda msg: msg.text == "ПОПОЛНИТЬ баланс" and msg.from_user.username == ADMIN)
+async def admin_topup(msg: types.Message):
+    await msg.answer("Введите сумму пополнения баланса Админа:", reply_markup=types.ReplyKeyboardRemove())
     await IncomeFSM.amount.set()
 
 @dp.message_handler(state=IncomeFSM.amount)
@@ -218,7 +222,6 @@ async def expense_to_admin(msg: types.Message, state: FSMContext):
     add_expense(username, amount, resource, photo_id, is_cash, to_admin)
     update_user_balance(username, -amount)
     if to_admin:
-        # Notify admin
         text = f"Новый расходник от @{username} на сумму {amount} грн. Категория: {resource}\nДата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         if photo_id:
             await bot.send_photo(chat_id=f"@{ADMIN}", photo=photo_id, caption=text, reply_markup=InlineKeyboardMarkup().add(
@@ -233,7 +236,7 @@ async def expense_to_admin(msg: types.Message, state: FSMContext):
         await msg.answer("Расход просто списан с баланса.", reply_markup=main_keyboard(username))
     await state.finish()
 
-@dp.message_handler(lambda msg: msg.text == "Баланс" and (msg.from_user.username in HR_LIST or msg.from_user.username in IT_LIST))
+@dp.message_handler(lambda msg: msg.text == "Баланс" and (msg.from_user.username in HR_LIST or msg.from_user.username in IT_LIST or msg.from_user.username == ADMIN))
 async def user_balance(msg: types.Message):
     username = msg.from_user.username
     balance = get_user_balance(username)
@@ -253,7 +256,6 @@ async def admin_give_category(msg: types.Message, state: FSMContext):
         await msg.answer("Выберите hr или it")
         return
     await state.update_data(category=cat)
-    # выбираем пользователя
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     lst = HR_LIST if cat == "hr" else IT_LIST
     for u in lst:
@@ -309,16 +311,27 @@ async def admin_stats(msg: types.Message):
     out += f"\nВсего потрачено: {total} грн"
     await msg.answer(out)
 
-# --- Misc / Render keepalive ---
-async def keep_alive():
-    while True:
-        try:
-            await bot.get_me()
-            await asyncio.sleep(600)
-        except Exception:
-            await asyncio.sleep(60)
+# --- Webhook settings for Render ---
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://efvrfkefe.onrender.com")  # Укажите ваш render url
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+
+WEBAPP_HOST = "0.0.0.0"
+WEBAPP_PORT = int(os.environ.get("PORT", 10000))
+
+async def on_startup(dp):
+    await bot.set_webhook(WEBHOOK_URL)
+
+async def on_shutdown(dp):
+    await bot.delete_webhook()
 
 if __name__ == '__main__':
-    loop = asyncio.get_event_loop()
-    loop.create_task(keep_alive())
-    executor.start_polling(dp, skip_updates=True)
+    start_webhook(
+        dispatcher=dp,
+        webhook_path=WEBHOOK_PATH,
+        on_startup=on_startup,
+        on_shutdown=on_shutdown,
+        host=WEBAPP_HOST,
+        port=WEBAPP_PORT,
+        skip_updates=True,
+    )
