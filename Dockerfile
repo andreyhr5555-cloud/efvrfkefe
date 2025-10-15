@@ -1,10 +1,7 @@
-FROM python:3.11
-
+FROM python:3.11-slim
 WORKDIR /app
-
-COPY requirements.txt .
+COPY . /app
 RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
-
-CMD ["python", "bot_Version2.py"]
+# expose port for webhook / health
+EXPOSE 8080
+CMD ["python","bot_Version2.py"]
